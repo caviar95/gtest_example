@@ -664,3 +664,119 @@ TEST(WorkerTest, AsyncCallbackIsTriggeredLater) {
 | `EXPECT_CALL` + 参数断言       | 检查回调参数    |
 | `std::promise/future`      | 更准确等待异步结果 |
 
+是的，**gtest 本身并不直接支持“函数级别的 stub 替换”**，但你**可以通过 C++ 的链接机制（Linker 技巧）或编译单位划分**来实现：
+
+---
+
+## ✅ 方法一：编写一个 **Stub 文件**，重新定义函数（适用于非虚函数、C 函数等）
+
+### 💡 原理：
+
+如果你在测试中 **提前提供了同名函数定义**，**链接器会优先用你的 stub 替代真实实现**（只要链接顺序正确，或者真实实现不参与链接）。
+
+---
+
+### 🔧 示例：被测代码调用内部函数
+
+```cpp
+// lib/foo.cpp （被测模块）
+#include <iostream>
+
+int InternalCompute(int x) {
+    std::cout << "Real InternalCompute called\n";
+    return x * 2;
+}
+
+int DoWork(int a) {
+    return InternalCompute(a) + 1;
+}
+```
+
+---
+
+### ✅ 测试中 stub 内部函数
+
+```cpp
+// test/foo_stub.cpp
+int InternalCompute(int x) {
+    return 1000 + x;  // mock/stub implementation
+}
+```
+
+---
+
+### ✅ 测试代码
+
+```cpp
+// test/test_foo.cpp
+#include <gtest/gtest.h>
+
+int DoWork(int a); // 来自 lib/foo.cpp
+
+TEST(FooTest, StubInternalCompute) {
+    EXPECT_EQ(DoWork(1), 1001 + 1);
+}
+```
+
+---
+
+### ✅ CMakeLists 示例
+
+```cmake
+add_library(foo STATIC foo.cpp)
+add_library(foo_stub STATIC foo_stub.cpp)
+
+add_executable(test_foo test_foo.cpp)
+target_link_libraries(test_foo PRIVATE foo_stub)  # stub 优先
+target_link_libraries(test_foo PRIVATE gtest gtest_main)
+```
+
+> ⚠️ 注意：**不要链接真实的 `foo.cpp`（包含原始 `InternalCompute` 实现）**，否则链接时可能报“duplicate symbol”或使用真实逻辑。
+
+---
+
+## ✅ 方法二：使用 `-Wl,--wrap=symbol` （更底层方式）
+
+这是 GCC/Clang 支持的链接器参数，用于“重定向函数调用”。
+
+### 示例：
+
+```sh
+g++ main.o -Wl,--wrap=InternalCompute -o test
+```
+
+并实现：
+
+```cpp
+int __wrap_InternalCompute(int x) {
+    return 999;  // stub 实现
+}
+
+int __real_InternalCompute(int x);  // 可选，调用真实逻辑
+```
+
+适合大项目中临时替换 C 风格函数（如 `malloc`, `send`, `fopen`）。
+
+---
+
+## ✅ 方法三：将内部函数提取为虚函数或注入依赖（推荐方式）
+
+如果你经常要 mock 某个函数，考虑：
+
+| 方法               | 优点       | 示例                                   |
+| ---------------- | -------- | ------------------------------------ |
+| 虚函数 + mock 类     | 支持 gmock | `virtual int Compute()`              |
+| 接口注入             | 更灵活      | `ICompute* compute`                  |
+| std::function 注入 | 最轻量      | `std::function<int(int)> internalFn` |
+
+---
+
+## ✅ 总结
+
+| 方法              | 场景                   | 是否推荐        |
+| --------------- | -------------------- | ----------- |
+| stub .cpp 文件    | 测试 C 函数或内部函数逻辑       | ✅ 简单、有效     |
+| `--wrap`        | 控制所有调用、底层依赖（如系统 API） | ⚠️ 对构建系统要求高 |
+| 接口/虚函数替换        | 设计良好的 C++ 模块         | ✅ 最推荐       |
+| gmock + Adapter | 无法 mock 的封闭类         | ✅           |
+
